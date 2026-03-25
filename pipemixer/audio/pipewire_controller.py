@@ -5,43 +5,42 @@ import threading
 
 class PipeWireController:
 
-    def __init__(self, poll_interval=0.1):
-        self.node_cache = {}        # app_name -> list of node IDs
-        self.last_values = {}       # app_name -> last slider value (0.0–1.0)
+    def __init__(self, poll_interval=0.25):
+        self.node_cache = {}
+        self.last_values = {}
         self.poll_interval = poll_interval
         self.running = True
 
-        # Start background thread to refresh nodes automatically
         threading.Thread(target=self._poll_nodes_loop, daemon=True).start()
 
-    def set_volume(self, app_name, midi_value):
+    # ---------------- Public ----------------
+    def set_volume(self, app_name, volume):
         """
-        Update slider value for an app (0–127 MIDI)
+        Volume is expected 0.0–1.0
         """
-        volume = midi_value / 127
         self.last_values[app_name] = volume
 
-        # Apply immediately to any known nodes
-        node_ids = self.get_cached_nodes(app_name)
-        for node in node_ids:
+        nodes = self._get_nodes_for_app(app_name)
+        for node in nodes:
             self._apply_node_volume(node, volume)
 
-    def get_cached_nodes(self, app_name):
-        """
-        Return cached nodes if they exist; otherwise find and cache them.
-        """
-        if app_name in self.node_cache:
-            return self.node_cache[app_name]
+    # ---------------- Node Discovery ----------------
+    def _get_nodes_for_app(self, app_name):
+        current_nodes = set(self._find_nodes(app_name))
 
-        nodes = self.find_nodes(app_name)
-        self.node_cache[app_name] = nodes
-        print(f"Cached nodes for {app_name}: {nodes}")
-        return nodes
+        if app_name not in self.node_cache:
+            self.node_cache[app_name] = current_nodes
+            print(f"Cached nodes for {app_name}: {list(current_nodes)}")
+            return current_nodes
 
-    def find_nodes(self, name):
-        """
-        Return a list of PipeWire node IDs matching the app name.
-        """
+        new_nodes = current_nodes - self.node_cache[app_name]
+        if new_nodes:
+            print(f"New nodes for {app_name}: {list(new_nodes)}")
+
+        self.node_cache[app_name] = current_nodes
+        return current_nodes
+
+    def _find_nodes(self, name):
         result = subprocess.run(
             ["wpctl", "status"],
             capture_output=True,
@@ -49,43 +48,44 @@ class PipeWireController:
         )
 
         nodes = []
+
         for line in result.stdout.splitlines():
             if name.lower() in line.lower():
-                parts = line.strip().split(".")
-                if parts[0].isdigit():
-                    nodes.append(parts[0])
+                parts = line.strip().split()
+                if parts and parts[0].endswith("."):
+                    node_id = parts[0].replace(".", "")
+                    if node_id.isdigit():
+                        nodes.append(node_id)
 
         return nodes
 
+    # ---------------- Volume ----------------
     def _apply_node_volume(self, node_id, volume):
-        subprocess.run(
-            ["wpctl", "set-volume", str(node_id), str(volume)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
+        last_volume = getattr(self, "_last_node_volume", {})
+        if node_id in last_volume and abs(last_volume[node_id] - volume) < 0.01:
+            return  # Skip tiny changes
+        last_volume[node_id] = volume
 
+        # Run asynchronously to avoid blocking
+        threading.Thread(target=subprocess.run, args=(
+            ["wpctl", "set-volume", str(node_id), str(volume)],), kwargs={"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}).start()
+
+    # ---------------- Background ----------------
     def _poll_nodes_loop(self):
-        """
-        Background thread to detect new nodes and apply last slider value.
-        """
         while self.running:
             for app_name, volume in self.last_values.items():
-                nodes = self.find_nodes(app_name)
-                # Only update cache if new nodes appear
-                if app_name not in self.node_cache:
-                    self.node_cache[app_name] = nodes
-                else:
-                    # Add new nodes that weren’t in cache
-                    for node in nodes:
-                        if node not in self.node_cache[app_name]:
-                            self.node_cache[app_name].append(node)
+                current_nodes = set(self._find_nodes(app_name))
+                cached_nodes = self.node_cache.get(app_name, set())
 
-                # Apply last known volume to all nodes
-                for node in self.node_cache[app_name]:
+                new_nodes = current_nodes - cached_nodes
+
+                for node in new_nodes:
+                    print(f"Applying volume to new node {node} ({app_name})")
                     self._apply_node_volume(node, volume)
+
+                self.node_cache[app_name] = current_nodes
 
             time.sleep(self.poll_interval)
 
     def stop(self):
-        """Stop the polling thread cleanly."""
         self.running = False
