@@ -11,12 +11,9 @@ class MidiEngine:
 
         # ---------------- Channel state ----------------
         self.slider_app = [None] * num_channels
-        self.slider_values = [0.5] * num_channels
+        self.slider_values = [1] * num_channels
         self.slider_muted = [False] * num_channels
         self.slider_soloed = [False] * num_channels
-
-        # ---------------- Startup protection ----------------
-        self._startup_ignore_messages = 100
 
         # ---------------- Edge detection ----------------
         self._last_cc_value = [0] * 128
@@ -172,11 +169,6 @@ class MidiEngine:
         print(f"MIDI: {data}")
 
         if len(data) < 3:
-            return
-
-        # Drop first N MIDI messages (device initialization spam)
-        if self._startup_ignore_messages > 0:
-            self._startup_ignore_messages -= 1
             return
 
         status, note_cc, value = data[:3]
