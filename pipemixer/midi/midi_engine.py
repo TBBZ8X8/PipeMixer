@@ -16,7 +16,7 @@ class MidiEngine:
         self.slider_soloed = [False] * num_channels
 
         # ---------------- Startup protection ----------------
-        self._startup_ignore_messages = 20
+        self._startup_ignore_messages = 100
 
         # ---------------- Edge detection ----------------
         self._last_cc_value = [0] * 128
@@ -32,6 +32,14 @@ class MidiEngine:
 
         # Start MIDI polling
         threading.Thread(target=self._poll_midi, daemon=True).start()
+
+        # Force clean startup state
+        self.slider_muted = [False] * self.num_channels
+        self.slider_soloed = [False] * self.num_channels
+        self.slider_app = [None] * self.num_channels
+
+        # Reset LEDs AFTER a short delay (let device settle)
+        threading.Timer(0.5, self._update_led_all).start()
 
     # ---------------- MIDI Ports ----------------
     def _open_midi_ports(self, in_name, out_name):
@@ -88,7 +96,6 @@ class MidiEngine:
     # ---------------- Slider ----------------
     def slider_moved(self, channel_index, midi_value):
         self.slider_values[channel_index] = midi_value / 127.0
-        self._apply_channel_volume(channel_index)
         self._update_led(channel_index)
 
     # ---------------- Volume Logic ----------------
@@ -136,12 +143,30 @@ class MidiEngine:
 
     # ---------------- MIDI Polling ----------------
     def _poll_midi(self):
+        last_tick = time.time()
+
         while True:
-            msg = self.midi_in.get_message()
-            if msg:
+            # Drain all pending messages
+            while True:
+                msg = self.midi_in.get_message()
+                if not msg:
+                    break
+
                 data, _ = msg
                 self._handle_midi_message(data)
-            time.sleep(0.001)
+
+            now = time.time()
+
+            # ~60Hz processing loop
+            if now - last_tick >= 0.016:
+                last_tick = now
+                self._process_frame()
+
+            time.sleep(0.0005)
+
+    def _process_frame(self):
+        for i in range(self.num_channels):
+            self._apply_channel_volume(i)
 
     def _handle_midi_message(self, data):
         print(f"MIDI: {data}")
