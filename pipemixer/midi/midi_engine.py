@@ -66,13 +66,13 @@ class MidiEngine:
         self.slider_app[channel_index] = app_name
         print(f"Channel {channel_index} bound to {app_name}")
         self._apply_channel_volume(channel_index)
-        self._update_led(channel_index)
+        self._update_led_all()
     # ---------------- Mute ----------------
     def toggle_mute(self, channel_index):
         self.slider_muted[channel_index] = not self.slider_muted[channel_index]
         print(f"Channel {channel_index} mute={self.slider_muted[channel_index]}")
         self._apply_channel_volume(channel_index)
-        self._update_led(channel_index)
+        self._update_led_all()
 
     # ---------------- Solo (Mutually Exclusive) ----------------
     def toggle_solo(self, channel_index):
@@ -125,14 +125,18 @@ class MidiEngine:
 
     # ---------------- LEDs ----------------
     def _update_led(self, channel_index):
-        r_on = 127 if self.slider_app[channel_index] else 0
-        m_on = 127 if self.slider_muted[channel_index] else 0
-        s_on = 127 if self.slider_soloed[channel_index] else 0
+        # Notes based on Mackie layout
+        rec_note = channel_index          # R
+        solo_note = channel_index + 8     # S
+        mute_note  = channel_index + 16    # M
 
-        base_cc = 20 + channel_index * 3
-        self.midi_out.send_message([0xB0, base_cc, r_on])
-        self.midi_out.send_message([0xB0, base_cc + 1, m_on])
-        self.midi_out.send_message([0xB0, base_cc + 2, s_on])
+        def send(note, state):
+            velocity = 127 if state else 0
+            self.midi_out.send_message([0x90, note, velocity])
+
+        send(rec_note, self.slider_app[channel_index] is not None)
+        send(solo_note, self.slider_soloed[channel_index])
+        send(mute_note, self.slider_muted[channel_index])
 
     def _update_led_all(self):
         for i in range(self.num_channels):
@@ -162,8 +166,8 @@ class MidiEngine:
             time.sleep(0.0005)
 
     def _process_frame(self):
-        for i in range(self.num_channels):
-            self._apply_channel_volume(i)
+            for i in range(self.num_channels):
+                self._apply_channel_volume(i)
 
     def _handle_midi_message(self, data):
         print(f"MIDI: {data}")
@@ -171,39 +175,49 @@ class MidiEngine:
         if len(data) < 3:
             return
 
-        status, note_cc, value = data[:3]
+        status = data[0]
+        data1 = data[1]
+        data2 = data[2]
 
-        # Edge detection
-        previous_value = self._last_cc_value[note_cc]
-        self._last_cc_value[note_cc] = value
+        msg_type = status & 0xF0
+        channel = status & 0x0F
 
-        # Only trigger on rising edge (button press)
-        is_press = previous_value == 0 and value > 0
+        # ---------------- 🎚 Sliders (Pitch Bend) ----------------
+        if msg_type == 0xE0:
+            # Pitch bend is 14-bit: combine LSB + MSB
+            value = data1 | (data2 << 7)
+            normalized = value / 16383.0
 
-        # Control Change
-        if 0xB0 <= status <= 0xBF:
+            # In Mackie mode, each channel uses a different MIDI channel
+            channel_index = channel
 
-            # 🎚 Sliders (0–7)
-            if 0 <= note_cc <= 7:
-                channel_index = note_cc
-                self.slider_moved(channel_index, value)
+            if channel_index < self.num_channels:
+                self.slider_values[channel_index] = normalized
+                print(f"Slider {channel_index} = {normalized:.2f}")
 
-            # 🎛 Knobs (16–23) → ignore for now
-            elif 16 <= note_cc <= 23:
-                return
+        # ---------------- 🔘 Buttons (Note On/Off) ----------------
+        elif msg_type == 0x90:  # Note On
+            note = data1
+            velocity = data2
 
-            # 🔘 Solo (S) buttons (32–39)
-            elif 32 <= note_cc <= 39 and is_press:
-                channel_index = note_cc - 32
+            if velocity == 0:
+                return  # treat as Note Off
+
+            # ---- Mapping (typical Mackie layout) ----
+            # These may vary slightly — we’ll refine if needed
+
+            # R button → bind
+            if 0 <= note <= 7:
+                channel_index = note
+                focused_app = "Firefox"  # placeholder
+                self.bind_slider_to_app(channel_index, focused_app)
+
+            # S button → solo
+            elif 8 <= note <= 15:
+                channel_index = note - 8
                 self.toggle_solo(channel_index)
 
-            # 🔇 Mute (M) buttons (48–55)
-            elif 48 <= note_cc <= 55 and is_press:
-                channel_index = note_cc - 48
+            # M button → mute
+            elif 16 <= note <= 23:
+                channel_index = note - 16
                 self.toggle_mute(channel_index)
-
-            # 🔴 Record (R) buttons (64–71)
-            elif 64 <= note_cc <= 71 and is_press:
-                channel_index = note_cc - 64
-                focused_app = "Firefox"
-                self.bind_slider_to_app(channel_index, focused_app)
