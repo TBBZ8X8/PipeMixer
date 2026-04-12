@@ -1,2 +1,20 @@
+# Python
 __pycache__/
-requirements.txt
+*.pyc
+*.pyo
+
+# Virtual env
+.venv/
+venv/
+
+# Build
+dist/
+build/
+*.egg-info/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
