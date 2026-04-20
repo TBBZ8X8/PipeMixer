@@ -1,0 +1,12 @@
+[Unit]
+Description=PipeMixer — MIDI per-app volume mixer
+After=pipewire.service wireplumber.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/pipemixer
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
