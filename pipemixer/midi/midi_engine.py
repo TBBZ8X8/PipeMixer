@@ -52,7 +52,8 @@ class MidiEngine:
 
         self._update_led_all()
         threading.Thread(target=self._poll_midi,        daemon=True).start()
-        threading.Thread(target=self._auto_unbind_loop, daemon=True).start()
+        threading.Thread(target=self._auto_unbind_loop,   daemon=True).start()
+        threading.Thread(target=self._deferred_rebind_loop, daemon=True).start()
 
         # Restore saved bindings, then re-apply after device settles
         self._restore_bindings()
@@ -139,6 +140,30 @@ class MidiEngine:
                     self.pw.set_volume(app_name, 1.0)
                     self._update_led(i)
             time.sleep(1.0)
+
+    # ---------------------------------------------------- Deferred rebind loop
+
+    def _deferred_rebind_loop(self) -> None:
+        """
+        Watch for saved apps that weren't running at startup and
+        automatically rebind them to their channel when they appear.
+        Runs every 3 seconds to avoid hammering the system.
+        """
+        while True:
+            time.sleep(3.0)
+            saved = self.pw.load_bindings(self.num_channels)
+            active_apps = self.pw.get_apps()
+
+            for i, app_name in enumerate(saved):
+                if not app_name:
+                    continue
+                # Only rebind if the channel is currently empty
+                # and the app has just appeared in PipeWire
+                if self.slider_app[i] is None and app_name in active_apps:
+                    print(f"Deferred rebind: channel {i} → {app_name}")
+                    self.slider_app[i] = app_name
+                    self._apply_channel_volume(i)
+                    self._update_led(i)
 
     # ------------------------------------------------------------------- Mute
 
