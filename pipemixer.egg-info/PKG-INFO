@@ -1,3 +1,12 @@
+Metadata-Version: 2.4
+Name: pipemixer
+Version: 0.3.0
+Summary: MIDI-controlled per-app volume mixer for Linux/PipeWire
+License: MIT
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: python-rtmidi>=1.5
+
 # PipeMixer
 
 Per-app volume mixer for Linux, controlled by a Korg nanoKONTROL2 (Mackie mode).

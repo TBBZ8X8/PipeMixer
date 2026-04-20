@@ -1,0 +1,2 @@
+[console_scripts]
+pipemixer = pipemixer.main:main
