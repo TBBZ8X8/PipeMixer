@@ -3,6 +3,7 @@ Description=PipeMixer — MIDI per-app volume mixer
 After=pipewire.service wireplumber.service
 
 [Service]
+Environment=PYTHONUNBUFFERED=1
 Type=simple
 ExecStart=%h/.local/bin/pipemixer
 Restart=on-failure
