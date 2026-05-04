@@ -1,27 +1,25 @@
-# main.py
-
+import signal
 import time
+
 from pipemixer.midi.midi_engine import MidiEngine
 
-def main():
-    print("Starting PipeMixer prototype")
 
-    # Create MidiEngine with 8 channels
+def main() -> None:
+    print("Starting PipeMixer")
+
     midi = MidiEngine(num_channels=8)
 
-    # Run indefinitely
-    try:
-        while True:
-            time.sleep(1)
-            # Here you would normally poll MIDI input
-            # For example:
-            # midi.slider_moved(channel_index, midi_value)
-            # midi.toggle_mute(channel_index)
-            # midi.toggle_solo(channel_index)
-            # midi.bind_slider_to_app(channel_index, focused_app)
-    except KeyboardInterrupt:
-        print("Stopping PipeMixer")
-        midi.pw.running = False
+    def _shutdown(sig, frame):
+        print("\nStopping PipeMixer")
+        midi.pw.stop()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGINT,  _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    while True:
+        time.sleep(1)
+
 
 if __name__ == "__main__":
     main()

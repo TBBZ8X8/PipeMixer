@@ -1,0 +1,42 @@
+{
+  "name": "Korg nanoKONTROL2 (Mackie mode)",
+  "device_match": "nanoKONTROL",
+  "mode": "mackie",
+  "notes": {
+    "How to enter Mackie mode": "Hold SET MARKER + FF while connecting USB cable"
+  },
+  "leds": {
+    "rec_base":  0,
+    "solo_base": 8,
+    "mute_base": 16
+  },
+  "transport": {
+    "prev_track": 46,
+    "next_track": 47,
+    "cycle":      89,
+    "rew":        91,
+    "ff":         92,
+    "stop":       93,
+    "play":       94,
+    "rec":        95
+  },
+  "transport_actions": {
+    "prev_track": "playerctl_previous",
+    "next_track": "playerctl_next",
+    "cycle":      "unassigned",
+    "rew":        "key_left",
+    "ff":         "key_right",
+    "stop":       "playerctl_stop",
+    "play":       "playerctl_play_pause",
+    "rec":        "mute_all"
+  },
+  "channel_buttons": {
+    "rec_note_base":  0,
+    "solo_note_base": 8,
+    "mute_note_base": 16
+  },
+  "sliders": {
+    "type":       "pitchbend",
+    "count":      8
+  }
+}
