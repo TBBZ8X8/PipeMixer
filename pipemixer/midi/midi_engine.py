@@ -19,31 +19,30 @@ from pipemixer.audio.pipewire_controller import PipeWireController
 
 # ── Profile loading ───────────────────────────────────────────────────────────
 
-DEFAULT_PROFILE = os.path.join(
-    os.path.dirname(__file__),
-    "../../profiles/nanokontrol2_mackie.json"
-)
-
-
 def load_profile(path: str | None = None) -> dict:
-    """Load a device profile JSON. Falls back to nanoKONTROL2 Mackie."""
-    # Check user config dir first
-    user_profile = os.path.expanduser("~/.config/pipemixer/profiles/nanokontrol2_mackie.json")
+    """Load a device profile JSON. Falls back to built-in nanoKONTROL2 Mackie defaults."""
+    search_paths = [
+        path,
+        os.environ.get("PIPEMIXER_PROFILE"),
+        os.path.expanduser("~/.config/pipemixer/profiles/nanokontrol2_mackie.json"),
+    ]
 
-    profile_path = path or os.environ.get("PIPEMIXER_PROFILE") or user_profile
+    for profile_path in search_paths:
+        if not profile_path:
+            continue
+        try:
+            with open(os.path.normpath(profile_path)) as f:
+                profile = json.load(f)
+            print(f"Loaded profile: {profile.get('name', profile_path)}")
+            return profile
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            print(f"Failed to load profile {profile_path}: {e}")
+            continue
 
-    try:
-        with open(os.path.normpath(profile_path)) as f:
-            profile = json.load(f)
-        print(f"Loaded profile: {profile.get('name', profile_path)}")
-        return profile
-    except FileNotFoundError:
-        print("Using built-in nanoKONTROL2 Mackie defaults")
-        return _default_profile()
-    except Exception as e:
-        print(f"Failed to load profile {profile_path}: {e}")
-        print("Using built-in nanoKONTROL2 Mackie defaults")
-        return _default_profile()
+    print("Using built-in nanoKONTROL2 Mackie defaults")
+    return _default_profile()
 
 
 def _default_profile() -> dict:
@@ -100,6 +99,9 @@ class MidiEngine:
         self.slider_soloed = [False] * num_channels
         self._all_muted    = False
         self._last_value   = [0] * 128
+        self._r_press_time: dict[int, float] = {}  # channel -> time R was pressed
+        self._r_cleared: dict[int, bool] = {}    # channel -> whether long-press clear fired
+        self._start_time: float = time.time()    # used to ignore echoed MIDI at startup
 
         # Per-channel app history for deferred rebind
         # BUG FIX: when an app is moved to a new channel, it is removed
@@ -232,15 +234,20 @@ class MidiEngine:
     # ------------------------------------------------------- Auto-unbind loop
 
     def _auto_unbind_loop(self) -> None:
+        """
+        Unbind a channel when its app closes entirely.
+        Uses process-level checking (psutil) rather than audio activity,
+        so apps that pause audio (e.g. Firefox with a paused video) are
+        NOT unbound — only apps that have actually quit.
+        """
         while True:
-            active_apps = self.pw.get_apps()
             for i, app_name in enumerate(self.slider_app):
-                if app_name and app_name not in active_apps:
+                if app_name and not self.pw.is_app_running(app_name):
                     print(f"Channel {i} auto-unbinding {app_name} (app closed)")
                     self.slider_app[i] = None
                     self.pw.set_volume(app_name, 1.0)
                     self._update_led(i)
-            time.sleep(1.0)
+            time.sleep(2.0)
 
     # ---------------------------------------------------- Deferred rebind loop
 
@@ -249,15 +256,20 @@ class MidiEngine:
         Watch for saved apps that weren't running at startup and
         auto-bind them when they appear. Each channel can have multiple
         saved apps — first one found running wins.
+        Only binds if the channel is currently empty.
         """
         while True:
             time.sleep(3.0)
             active_apps = self.pw.get_apps()
             for i, app_list in enumerate(self.slider_app_history):
                 if self.slider_app[i] is not None:
-                    continue
+                    continue  # Channel already occupied — first bind wins
                 for app_name in app_list:
-                    if app_name in active_apps:
+                    if (app_name in active_apps
+                            and app_name not in self.pw.IGNORE_APPS
+                            and not app_name.startswith("output_")
+                            and not app_name.startswith("input_")
+                            and not app_name.startswith("monitor_")):
                         print(f"Deferred rebind: channel {i} → {app_name}")
                         self.slider_app[i] = app_name
                         self._apply_channel_volume(i)
@@ -403,16 +415,19 @@ class MidiEngine:
                 self.slider_values[ch] = (data1 | (data2 << 7)) / 16383.0
 
         elif msg_type == 0x90:
-            if data2 == 0:
-                return  # ignore release
-
             note = data1
             rec_end  = self.rec_note_base  + self.num_channels - 1
             solo_end = self.solo_note_base + self.num_channels - 1
             mute_end = self.mute_note_base + self.num_channels - 1
 
+            if data2 == 0:
+                # On release, check if this is an R button long-press
+                if self.rec_note_base <= note <= rec_end:
+                    self._handle_r_release(note - self.rec_note_base)
+                return
+
             if self.rec_note_base <= note <= rec_end:
-                self._handle_bind(note - self.rec_note_base)
+                self._handle_r_press(note - self.rec_note_base)
             elif self.solo_note_base <= note <= solo_end:
                 self.toggle_solo(note - self.solo_note_base)
             elif self.mute_note_base <= note <= mute_end:
@@ -428,3 +443,102 @@ class MidiEngine:
             print("No app available to bind")
             return
         self.bind_slider_to_app(channel_index, focused_app)
+
+    def _handle_r_press(self, channel_index: int) -> None:
+        """
+        On R press: record time and start the long-press monitor thread.
+        Ignores presses within the first 1.5s of startup to avoid acting
+        on LED echo messages the device sends back when we initialize LEDs.
+
+        Timeline:
+          0s  — pressed, LED solid (normal)
+          1s  — LED slow blink (warning: keep holding)
+          2s  — rapid flash + clear fires (while still held)
+          release before 1s — normal bind
+          release between 1-2s — normal bind, blink stops
+          release after 2s — clear already fired, ignore
+        """
+        # Ignore R presses during startup grace period (device echoes LED init)
+        if time.time() - self._start_time < 1.0:
+            return
+
+        self._r_press_time[channel_index] = time.time()
+
+        threading.Thread(
+            target=self._long_press_monitor,
+            args=(channel_index, self._r_press_time[channel_index]),
+            daemon=True,
+        ).start()
+
+    def _handle_r_release(self, channel_index: int) -> None:
+        """
+        On R release:
+        - If held ≥2s (_r_cleared set) → rapid flash 3x then clear
+        - If held <1s → normal bind
+        - If held 1–2s → normal bind, blink already stopped
+        """
+        press_time = self._r_press_time.pop(channel_index, None)
+        if press_time is None:
+            return
+
+        if self._r_cleared.pop(channel_index, False):
+            # Long press confirmed — flash 3x then clear
+            note = self.led_rec_base + channel_index
+            for _ in range(3):
+                self._send_led(note, True)
+                time.sleep(0.07)
+                self._send_led(note, False)
+                time.sleep(0.07)
+            self._clear_channel_history(channel_index)
+        else:
+            # Short or medium press — normal bind
+            self._handle_bind(channel_index)
+
+    def _long_press_monitor(self, channel_index: int, press_time: float) -> None:
+        """
+        Background thread that drives LED feedback during R hold.
+
+        Timeline:
+          0–1s:   LED solid (normal)
+          1–2s:   LED slow blink (warning — keep holding)
+          2s+:    blink stops, LED goes solid — waiting for release
+          release after 2s: rapid flash 3x then clear fires
+        """
+        note = self.led_rec_base + channel_index
+
+        # Phase 1: 0–1s — LED stays solid, wait
+        while time.time() - press_time < 0.5:
+            if self._r_press_time.get(channel_index) != press_time:
+                return  # Released early — let _handle_r_release do normal bind
+            time.sleep(0.05)
+
+        # Phase 2: 1–2s — slow blink as warning
+        while time.time() - press_time < 1.0:
+            if self._r_press_time.get(channel_index) != press_time:
+                # Released between 1–2s — restore LED, normal bind
+                self._update_led(channel_index)
+                return
+            self._send_led(note, True)
+            time.sleep(0.15)
+            self._send_led(note, False)
+            time.sleep(0.15)
+
+        # Phase 3: 2s reached — stop blinking, go solid, wait for release
+        # Mark as cleared so _handle_r_release knows to fire clear on release
+        self._r_cleared[channel_index] = True
+        self._send_led(note, True)  # solid LED — "ready to clear on release"
+
+    def _clear_channel_history(self, channel_index: int) -> None:
+        """Clear all saved app history for a channel and unbind it."""
+        app_name = self.slider_app[channel_index]
+        old_history = self.slider_app_history[channel_index]
+
+        self.slider_app[channel_index] = None
+        self.slider_app_history[channel_index] = []
+
+        if app_name:
+            self.pw.set_volume(app_name, 1.0)
+
+        self._save_bindings()
+        print(f"Channel {channel_index} history cleared (was: {old_history})")
+        self._update_led(channel_index)

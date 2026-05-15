@@ -15,6 +15,7 @@ import subprocess
 import threading
 import time
 
+import psutil
 import pulsectl
 
 from pipemixer.system.focus_detector import (
@@ -93,18 +94,51 @@ class PipeWireController:
             print(f"Focus detection error: {e}")
             return None
 
+    IGNORE_APPS = {
+        "pipewire", "wireplumber", "kwin_wayland", "plasmashell",
+        "xdg-desktop-portal", "libcanberra", "wpctl", "audio-src",
+        "pipemixer", "steam", "steam voice settings",
+    }
+
     def get_best_app(self) -> str | None:
-        ignore = {
-            "pipewire", "wireplumber", "kwin_wayland", "plasmashell",
-            "xdg-desktop-portal", "libcanberra", "wpctl", "audio-src",
-        }
         candidates = [
             app for app in self.get_apps()
-            if app not in ignore
+            if app not in self.IGNORE_APPS
             and not app.startswith("output_")
             and not app.startswith("audio/")
+            and not app.startswith("input_")
+            and not app.startswith("monitor_")
         ]
         return candidates[-1] if candidates else None
+
+    def is_app_running(self, app_name: str) -> bool:
+        """
+        Check if an app is still running as a process, regardless of
+        whether it is currently producing audio. This prevents auto-unbind
+        from firing just because Firefox paused a video.
+
+        Checks in order:
+          1. PipeWire node cache (app is active and producing audio)
+          2. psutil process list (app is open but may be silent)
+        """
+        # Check PipeWire first (fast path)
+        if app_name in self.node_cache:
+            return True
+
+        # Fall back to process check
+        name = app_name.lower().removesuffix(".exe")
+        try:
+            for proc in psutil.process_iter(["name", "exe"]):
+                try:
+                    proc_name = (proc.info["name"] or "").lower().removesuffix(".exe")
+                    if name == proc_name or name in proc_name or proc_name in name:
+                        return True
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+        except Exception:
+            pass
+
+        return False
 
     def stop(self) -> None:
         self.running = False
