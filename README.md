@@ -143,6 +143,47 @@ Restart PipeMixer after editing.
 
 ---
 
+
+## Manual App Overrides
+
+Some apps can't be detected automatically — for example, Steam games where
+the window class is `steam_app_XXXXXXX` but PipeWire uses a completely
+different name like `elitedangerous64`.
+
+Create `~/.config/pipemixer/overrides.json` to map window class names to
+their PipeWire names manually:
+
+```json
+{
+  "steam_app_359320": "elitedangerous64",
+  "steam_app_812140": "elden ring.exe"
+}
+```
+
+**How to find the values:**
+
+Window class (the key) — run this while the app is focused:
+```bash
+sleep 3 && kdotool getactivewindow | xargs kdotool getwindowclassname
+```
+
+PipeWire name (the value) — run this while the app is playing audio:
+```bash
+pactl list sink-inputs | grep -E "application.name|node.name"
+```
+
+Use the value from `application.name` if present, otherwise `node.name`.
+
+After saving the file, restart PipeMixer:
+```bash
+systemctl --user restart pipemixer
+```
+
+> **Tip:** If you find an override that works for a well-known game, consider
+> opening an issue or pull request to get it added to the built-in matching.
+
+---
+
 ## Uninstall
 
 ```bash

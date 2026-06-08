@@ -15,6 +15,7 @@ import subprocess
 import threading
 import time
 
+import difflib
 import psutil
 import pulsectl
 
@@ -50,6 +51,7 @@ class PipeWireController:
         # _pulse_conn() as a context manager. This is thread-safe.
 
         self.focus_strategy = self._init_focus_strategy()
+        self._overrides = self._load_overrides()
 
         threading.Thread(target=self._poll_nodes_loop, daemon=True).start()
 
@@ -86,7 +88,15 @@ class PipeWireController:
                     return match
 
             if window_name:
-                return self._match_name(window_name)
+                # Check manual overrides first (window class -> pipewire name)
+                override = self._overrides.get(window_name.lower())
+                if override:
+                    print(f"Override match: '{window_name}' -> '{override}'")
+                    return override
+
+                match = self._match_name(window_name)
+                if match:
+                    return match
 
             return None
 
@@ -179,6 +189,35 @@ class PipeWireController:
             save_config({"allow_best_app_fallback": False})
             print("Focus detection disabled.")
             return FocusStrategy.NONE
+
+    # --------------------------------------------------------- Overrides
+
+    def _load_overrides(self) -> dict[str, str]:
+        """
+        Load manual window-class -> PipeWire-name mappings from
+        ~/.config/pipemixer/overrides.json.
+
+        Example file:
+          {
+            "steam_app_359320": "elitedangerous64",
+            "my_window_class":  "my_pipewire_app_name"
+          }
+
+        Keys are window class names as returned by kdotool/xdotool.
+        Values are PipeWire application names as shown in wpctl status
+        or pactl list sink-inputs.
+        """
+        path = os.path.expanduser("~/.config/pipemixer/overrides.json")
+        try:
+            with open(path) as f:
+                overrides = json.load(f)
+            print(f"Loaded {len(overrides)} override(s) from {path}")
+            return {k.lower(): v.lower() for k, v in overrides.items()}
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            print(f"Failed to load overrides: {e}")
+            return {}
 
     # --------------------------------------------------------- Focus detection helpers
 
@@ -278,41 +317,113 @@ class PipeWireController:
             pass
         return None
 
+    # Minimum score (0-100) required to consider a match valid.
+    # Below this threshold we assume it is a false positive.
+    MATCH_THRESHOLD = 50
+
+    def _score_match(self, a: str, b: str) -> int:
+        """
+        Score how well two app name strings match (0-100).
+
+        Scoring tiers:
+          100 - exact match after normalisation (.exe stripped, lowercased)
+           80 - very high combined sequence + length similarity (>= 0.85)
+           50 - significant combined similarity (>= 0.70, at threshold)
+           30 - partial similarity (>= 0.45, below threshold)
+            0 - no meaningful match
+
+        Guards:
+          - If one string is the other with only digits/punctuation appended
+            (e.g. "balatro" vs "balatro2"), score is 0 — treat as different app.
+          - Length ratio is multiplied into the score to prevent short strings
+            matching much longer ones (e.g. "fire" vs "firefox").
+        """
+        def norm(s: str) -> str:
+            return s.removesuffix(".exe").strip().lower()
+
+        na, nb = norm(a), norm(b)
+
+        if na == nb:
+            return 100
+
+        # Digit/punctuation suffix guard:
+        # "balatro" vs "balatro2" should score 0, not match
+        shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
+        suffix = longer[len(shorter):]
+        if longer.startswith(shorter) and re.match(r'^[\d\s\-_\.]+$', suffix):
+            return 0
+
+        # Combined score: sequence similarity * length ratio
+        # Both must be high for a confident match
+        len_ratio = min(len(na), len(nb)) / max(len(na), len(nb)) if max(len(na), len(nb)) > 0 else 0
+        ratio = difflib.SequenceMatcher(None, na, nb).ratio()
+        combined = ratio * len_ratio
+
+        if combined >= 0.85:
+            return 80
+        if combined >= 0.70:
+            return 50
+        if combined >= 0.45:
+            return 30
+
+        return 0
+
+    def _best_match(self, window_name: str, candidates: list[str]) -> tuple[str | None, int]:
+        """
+        Return (best_candidate, score) for window_name from candidates.
+        Returns (None, 0) if no candidate scores at or above MATCH_THRESHOLD.
+        """
+        if not candidates or not window_name:
+            return None, 0
+
+        best_name  = None
+        best_score = 0
+
+        for candidate in candidates:
+            score = self._score_match(window_name, candidate)
+            if score > best_score:
+                best_score = score
+                best_name  = candidate
+
+        if best_score >= self.MATCH_THRESHOLD:
+            return best_name, best_score
+
+        return None, best_score
+
     def _match_name(self, window_name: str) -> str | None:
+        """
+        Match a window class/name against PipeWire apps and pactl sink input
+        names using scored fuzzy matching with difflib.SequenceMatcher.
+
+        Tries wpctl node names first, then pulsectl sink input proplist names.
+        Returns the best match at or above MATCH_THRESHOLD, or None.
+        """
         pipewire_apps = self.get_apps()
 
-        def normalize(name: str) -> str:
-            return name.removesuffix(".exe").strip().lower()
+        # Try wpctl node names
+        match, score = self._best_match(window_name, pipewire_apps)
+        if match:
+            print(f"Name match: '{window_name}' -> '{match}' (score {score})")
+            return match
 
-        norm_win = normalize(window_name)
-
-        # 1. Exact match against wpctl nodes
-        if norm_win in pipewire_apps:
-            return norm_win
-
-        # 2. Normalized match
-        for app in pipewire_apps:
-            if normalize(app) == norm_win:
-                return app
-
-        # 3. Substring match
-        for app in pipewire_apps:
-            norm_app = normalize(app)
-            if norm_win and (norm_win in norm_app or norm_app in norm_win):
-                return app
-
-        # 4. Match against pulsectl sink input proplist names
+        # Try pulsectl sink input proplist names
         try:
             with self._pulse_conn() as pulse:
+                sink_names = []
                 for si in pulse.sink_input_list():
                     for field in ("application.name", "node.name"):
-                        val = normalize(si.proplist.get(field, ""))
-                        if val and (norm_win in val or val in norm_win):
-                            return si.proplist.get(field, "").lower()
+                        val = si.proplist.get(field, "")
+                        if val:
+                            sink_names.append(val)
+
+                match, score = self._best_match(window_name, sink_names)
+                if match:
+                    print(f"Sink match: '{window_name}' -> '{match}' (score {score})")
+                    return match.lower()
         except Exception:
             pass
 
-        print(f"No PipeWire match for '{window_name}'")
+        print(f"No match for '{window_name}' (all below threshold {self.MATCH_THRESHOLD})")
         return None
 
     # ---------------------------------------------------------- Node discovery
