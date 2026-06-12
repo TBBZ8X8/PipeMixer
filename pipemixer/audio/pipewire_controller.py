@@ -11,6 +11,7 @@ layer), so this is still talking to PipeWire under the hood.
 
 import json
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -53,7 +54,17 @@ class PipeWireController:
         self.focus_strategy = self._init_focus_strategy()
         self._overrides = self._load_overrides()
 
-        threading.Thread(target=self._poll_nodes_loop, daemon=True).start()
+        # Queue for signalling the event loop to re-apply volumes
+        # when new sink inputs appear
+        self._event_queue: queue.Queue = queue.Queue()
+
+        # Refresh node cache once at startup
+        self._refresh_nodes()
+
+        # Start background threads
+        threading.Thread(target=self._node_refresh_loop,  daemon=True).start()
+        threading.Thread(target=self._pulse_event_loop,   daemon=True).start()
+        threading.Thread(target=self._volume_apply_loop,  daemon=True).start()
 
     # ------------------------------------------------------------------ Public
 
@@ -546,9 +557,61 @@ class PipeWireController:
 
     # --------------------------------------------------------------- Background
 
-    def _poll_nodes_loop(self) -> None:
+    def _node_refresh_loop(self) -> None:
+        """
+        Periodically refresh the wpctl node cache for app discovery.
+        This is kept as a poll because wpctl has no event API.
+        Volume application is now event-driven via _pulse_event_loop.
+        """
         while self.running:
             self._refresh_nodes()
+            time.sleep(self.poll_interval)
+
+    def _pulse_event_loop(self) -> None:
+        """
+        Listen for PulseAudio/PipeWire sink input events via pulsectl.
+        When a new sink input appears, signal _volume_apply_loop to
+        re-apply all stored volumes — this handles apps that start
+        playing audio after we bound them.
+        """
+        while self.running:
+            try:
+                with pulsectl.Pulse("pipemixer-events") as pulse:
+                    def on_event(e):
+                        if e.facility == pulsectl.PulseEventFacilityEnum.sink_input:
+                            if e.t in (
+                                pulsectl.PulseEventTypeEnum.new,
+                                pulsectl.PulseEventTypeEnum.remove,
+                            ):
+                                # Non-blocking put — drop if queue is full
+                                try:
+                                    self._event_queue.put_nowait("sink_changed")
+                                except queue.Full:
+                                    pass
+
+                    pulse.event_mask_set(pulsectl.PulseEventMaskEnum.sink_input)
+                    pulse.event_callback_set(on_event)
+                    pulse.event_listen(timeout=5.0)  # returns every 5s even if no events
+
+            except Exception as e:
+                if self.running:
+                    print(f"Pulse event loop error: {e}, restarting in 2s...")
+                    time.sleep(2.0)
+
+    def _volume_apply_loop(self) -> None:
+        """
+        Re-apply stored volumes whenever the event loop signals a change,
+        or every 2 seconds as a safety net in case an event was missed.
+        """
+        while self.running:
+            try:
+                # Wait up to 2s for an event, then apply anyway as safety net
+                self._event_queue.get(timeout=2.0)
+            except queue.Empty:
+                pass  # Timeout — apply volumes as safety net
+
+            if not self.running:
+                break
+
             for app_name, volume in list(self.last_values.items()):
                 self._apply_volume_by_name(app_name, volume)
-            time.sleep(self.poll_interval)

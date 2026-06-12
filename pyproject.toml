@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pipemixer"
-version = "0.4.1"
+version = "0.5.0"
 description = "MIDI-controlled per-app volume mixer for Linux/PipeWire"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 
 dependencies = [
     "python-rtmidi>=1.5",
