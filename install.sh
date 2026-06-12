@@ -6,7 +6,7 @@
 set -e
 
 REPO="https://github.com/TBBZ8X8/PipeMixer"
-PIPEMIXER_VERSION="0.4.1"
+PIPEMIXER_VERSION="0.4.2"
 
 # ── Colours ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
