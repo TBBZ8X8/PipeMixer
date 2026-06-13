@@ -1,10 +1,17 @@
 import signal
+import sys
 import time
 
 from pipemixer.midi.midi_engine import MidiEngine
 
+__version__ = "0.5.0"
+
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-v"):
+        print(f"PipeMixer v{__version__}")
+        return
+
     print("Starting PipeMixer")
 
     midi = MidiEngine(num_channels=8)
